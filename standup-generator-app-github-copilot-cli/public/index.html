@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Standup Generator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <h1>📋 Standup Generator</h1>
+    <p>Generate daily standup notes from your git history.</p>
+    
+    <form id="standup-form">
+      <div class="form-row">
+        <input type="text" id="repo-path" placeholder="Repo paths, comma-separated (e.g., C:\Projects\repo1, C:\Projects\repo2)" required>
+        <button type="submit" id="generate-btn">Generate</button>
+      </div>
+      <input type="email" id="author-email" placeholder="Filter by author email (optional)">
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="remember-repo-path">
+        Remember settings
+      </label>
+    </form>
+
+    <div id="error" class="error hidden"></div>
+
+    <div id="results" class="results hidden">
+      <div id="day-sections"></div>
+      <section class="standup-section">
+        <h2>🚧 Blockers</h2>
+        <div class="form-row">
+          <input type="text" id="blocker-input" placeholder="Add a blocker...">
+          <button type="button" id="add-blocker-btn">Add</button>
+        </div>
+        <ul id="blockers-list"></ul>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const STORAGE_KEY = 'standupGenerator.settings.v1';
+
+    const form = document.getElementById('standup-form');
+    const repoInput = document.getElementById('repo-path');
+    const emailInput = document.getElementById('author-email');
+    const rememberRepoCheckbox = document.getElementById('remember-repo-path');
+    const generateBtn = document.getElementById('generate-btn');
+    const errorDiv = document.getElementById('error');
+    const resultsDiv = document.getElementById('results');
+    const daySectionsDiv = document.getElementById('day-sections');
+    const blockersList = document.getElementById('blockers-list');
+    const blockerInput = document.getElementById('blocker-input');
+    const addBlockerBtn = document.getElementById('add-blocker-btn');
+
+    function loadSettings() {
+      const defaults = { rememberRepoPath: false, repoPath: '', authorEmail: '', blockers: [] };
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return defaults;
+
+      try {
+        const parsed = JSON.parse(raw) || {};
+        const rememberRepoPath = typeof parsed.rememberRepoPath === 'boolean' ? parsed.rememberRepoPath : defaults.rememberRepoPath;
+        const repoPath = typeof parsed.repoPath === 'string' ? parsed.repoPath.trim() : defaults.repoPath;
+        const authorEmail = typeof parsed.authorEmail === 'string' ? parsed.authorEmail.trim() : defaults.authorEmail;
+        const blockers = Array.isArray(parsed.blockers)
+          ? parsed.blockers
+              .filter(b => typeof b === 'string')
+              .map(b => b.trim())
+              .filter(Boolean)
+          : defaults.blockers;
+        return { rememberRepoPath, repoPath, authorEmail, blockers };
+      } catch {
+        return defaults;
+      }
+    }
+
+    function saveSettings(next) {
+      const current = loadSettings();
+      const merged = { ...current, ...next };
+
+      const rememberRepoPath = !!merged.rememberRepoPath;
+      const repoPath = typeof merged.repoPath === 'string' ? merged.repoPath.trim() : '';
+      const authorEmail = typeof merged.authorEmail === 'string' ? merged.authorEmail.trim() : '';
+      const blockers = Array.isArray(merged.blockers)
+        ? merged.blockers
+            .filter(b => typeof b === 'string')
+            .map(b => b.trim())
+            .filter(Boolean)
+        : [];
+
+      const toStore = {
+        rememberRepoPath,
+        repoPath: rememberRepoPath ? repoPath : '',
+        authorEmail: rememberRepoPath ? authorEmail : '',
+        blockers
+      };
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
+    }
+
+    function applySettings() {
+      const settings = loadSettings();
+      rememberRepoCheckbox.checked = settings.rememberRepoPath;
+      if (settings.rememberRepoPath && settings.repoPath) {
+        repoInput.value = settings.repoPath;
+      }
+      if (settings.rememberRepoPath && settings.authorEmail) {
+        emailInput.value = settings.authorEmail;
+      }
+      renderBlockers(settings.blockers);
+    }
+
+    function buildCommitList(repos, getCommits) {
+      const ul = document.createElement('ul');
+      if (!repos || repos.length === 0) {
+        ul.innerHTML = '<li class="empty">No commits</li>';
+        return ul;
+      }
+      repos.forEach(repo => {
+        const commits = getCommits(repo);
+        const repoHeader = document.createElement('li');
+        repoHeader.className = 'repo-header';
+        repoHeader.textContent = repo.name;
+        ul.appendChild(repoHeader);
+
+        if (repo.error) {
+          const li = document.createElement('li');
+          li.className = 'empty';
+          li.textContent = `Error: ${repo.error}`;
+          ul.appendChild(li);
+        } else if (!commits || commits.length === 0) {
+          const li = document.createElement('li');
+          li.className = 'empty';
+          li.textContent = 'No commits';
+          ul.appendChild(li);
+        } else {
+          commits.forEach(c => {
+            const li = document.createElement('li');
+            li.textContent = `${c.message} — ${c.author}`;
+            ul.appendChild(li);
+          });
+        }
+      });
+      return ul;
+    }
+
+    function renderDaySections(repos) {
+      daySectionsDiv.innerHTML = '';
+
+      // Determine day slots from the first repo's days array
+      const daySlots = (repos && repos[0] && repos[0].days) ? repos[0].days : [];
+
+      // Render one section per past day (oldest → yesterday)
+      daySlots.forEach(slot => {
+        const section = document.createElement('section');
+        section.className = 'standup-section';
+        const h2 = document.createElement('h2');
+        h2.textContent = `📅 ${slot.label}`;
+        section.appendChild(h2);
+        section.appendChild(buildCommitList(repos, repo => {
+          const match = repo.days && repo.days.find(d => d.date === slot.date);
+          return match ? match.commits : [];
+        }));
+        daySectionsDiv.appendChild(section);
+      });
+
+      // Render Today section
+      const todaySection = document.createElement('section');
+      todaySection.className = 'standup-section';
+      const todayH2 = document.createElement('h2');
+      todayH2.textContent = '🎯 Today';
+      todaySection.appendChild(todayH2);
+      todaySection.appendChild(buildCommitList(repos, repo => repo.today));
+      daySectionsDiv.appendChild(todaySection);
+    }
+
+    function renderBlockers(blockers) {
+      blockersList.innerHTML = '';
+      if (!blockers || blockers.length === 0) {
+        blockersList.innerHTML = '<li class="empty">No blockers reported</li>';
+        return;
+      }
+
+      blockers.forEach((b, idx) => {
+        const li = document.createElement('li');
+        li.appendChild(document.createTextNode(`${b} `));
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.textContent = 'Remove';
+        removeBtn.addEventListener('click', () => {
+          const nextBlockers = loadSettings().blockers.filter((_, i) => i !== idx);
+          saveSettings({ blockers: nextBlockers });
+          renderBlockers(nextBlockers);
+        });
+
+        li.appendChild(removeBtn);
+        blockersList.appendChild(li);
+      });
+    }
+
+    function addBlocker() {
+      const text = blockerInput.value.trim();
+      if (!text) return;
+
+      const nextBlockers = [...loadSettings().blockers, text];
+      saveSettings({ blockers: nextBlockers });
+      renderBlockers(nextBlockers);
+      blockerInput.value = '';
+      blockerInput.focus();
+    }
+
+    addBlockerBtn.addEventListener('click', addBlocker);
+    blockerInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      addBlocker();
+    });
+
+    rememberRepoCheckbox.addEventListener('change', () => {
+      saveSettings({
+        rememberRepoPath: rememberRepoCheckbox.checked,
+        repoPath: repoInput.value,
+        authorEmail: emailInput.value
+      });
+    });
+
+    emailInput.addEventListener('input', () => {
+      if (!rememberRepoCheckbox.checked) return;
+      saveSettings({ rememberRepoPath: true, authorEmail: emailInput.value });
+    });
+
+    repoInput.addEventListener('input', () => {
+      if (!rememberRepoCheckbox.checked) return;
+      saveSettings({ rememberRepoPath: true, repoPath: repoInput.value });
+    });
+
+    applySettings();
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorDiv.classList.add('hidden');
+      resultsDiv.classList.add('hidden');
+      generateBtn.disabled = true;
+      generateBtn.textContent = 'Loading...';
+
+      if (rememberRepoCheckbox.checked) {
+        saveSettings({ rememberRepoPath: true, repoPath: repoInput.value, authorEmail: emailInput.value });
+      }
+
+      const repoPaths = repoInput.value.split(',').map(p => p.trim()).filter(Boolean);
+      const authorEmail = emailInput.value.trim();
+
+      try {
+        const res = await fetch('/api/standup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repoPaths, authorEmail })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to generate standup');
+        }
+
+        renderDaySections(data.repos);
+        renderBlockers(loadSettings().blockers);
+        resultsDiv.classList.remove('hidden');
+      } catch (err) {
+        errorDiv.textContent = err.message;
+        errorDiv.classList.remove('hidden');
+      } finally {
+        generateBtn.disabled = false;
+        generateBtn.textContent = 'Generate';
+      }
+    });
+  </script>
+</body>
+</html>
